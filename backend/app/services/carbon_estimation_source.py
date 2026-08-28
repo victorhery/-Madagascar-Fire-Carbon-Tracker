@@ -8,20 +8,14 @@ import ee
 
 class CarbonEstimationError(Exception):
     """
-    Erreur levée quand la source d'estimation carbone (GEE aujourd'hui) est
-    indisponible, mal configurée, ou renvoie une réponse invalide.
-    Volontairement indépendante de FastAPI (principe S), comme
-    FireDataSourceError pour le service FIRMS.
+    Erreur levée quand la source d'estimation carbone (GEE) est indisponible,
+    mal configurée, ou renvoie une réponse invalide. Volontairement
+    indépendante de FastAPI (principe S).
     """
 
 
 @dataclass
 class RawBurnedAreaEstimate:
-    """
-    Résultat d'estimation tel que reçu de la source externe, AVANT tout
-    passage en base. Distinct du modèle SQLAlchemy BurnedArea (principe S).
-    """
-
     region: str
     area_hectares: float
     carbon_tons_estimate: float
@@ -30,10 +24,6 @@ class RawBurnedAreaEstimate:
 
 
 class CarbonEstimationSourceInterface(ABC):
-    """Interface : une autre source d'estimation (autre produit satellite,
-    autre méthode de calcul carbone) pourra l'implémenter sans que le code
-    appelant n'ait à changer (principe O)."""
-
     @abstractmethod
     def estimate_burned_area(
         self,
@@ -48,35 +38,49 @@ class CarbonEstimationSourceInterface(ABC):
 class GeeCarbonEstimationService(CarbonEstimationSourceInterface):
     """
     Implémentation concrète utilisant Google Earth Engine et le produit
-    MODIS MCD64A1 (surface brûlée mensuelle, résolution 500m) -- un jeu de
-    données standard et déjà validé scientifiquement, plutôt qu'une
-    classification NDVI/dNBR maison qui demanderait un calibrage propre à
-    la zone COFAV.
+    MODIS MCD64A1 (surface brûlée mensuelle, résolution 500m).
 
-    Le facteur carbone (tonnes de carbone par hectare brûlé) est une
-    approximation générique pour forêt humide malgache -- à affiner plus
-    tard avec des coefficients IPCC Tier 2 propres à la végétation locale
-    si une précision scientifique plus fine est nécessaire.
+    Supporte 2 modes d'authentification, choisis automatiquement :
+    1. Compte de service (service_account_json fourni) -> mode prévu pour
+       la production/ONG, ne nécessite aucune interaction humaine.
+    2. Authentification personnelle (project_id fourni, pas de JSON) ->
+       mode dev local, suppose que `earthengine authenticate` a déjà été
+       lancé une fois en CLI dans ce venv (credentials mis en cache
+       localement par le SDK Earth Engine).
+
+    Le passage du mode 2 au mode 1 (migration vers l'ONG) ne nécessite
+    aucun changement de code, juste renseigner GEE_SERVICE_ACCOUNT_JSON
+    dans .env à la place de GEE_PROJECT_ID.
     """
 
     MODIS_BURNED_AREA_COLLECTION = "MODIS/061/MCD64A1"
 
     def __init__(
         self,
-        service_account_json: str,
+        service_account_json: str = "",
+        project_id: str = "",
         carbon_factor_tons_per_hectare: float = 150.0,
     ):
         self.service_account_json = service_account_json
+        self.project_id = project_id
         self.carbon_factor_tons_per_hectare = carbon_factor_tons_per_hectare
         self._initialized = False
 
     def _ensure_initialized(self) -> None:
         if self._initialized:
             return
-        credentials = ee.ServiceAccountCredentials(
-            email=None, key_data=self.service_account_json
-        )
-        ee.Initialize(credentials)
+
+        if self.service_account_json:
+            credentials = ee.ServiceAccountCredentials(
+                email=None, key_data=self.service_account_json
+            )
+            ee.Initialize(credentials, project=self.project_id or None)
+        else:
+            # Authentification personnelle : les credentials mis en cache
+            # localement par `earthengine authenticate` sont utilisés
+            # automatiquement, sans navigateur ni prompt supplémentaire.
+            ee.Initialize(project=self.project_id)
+
         self._initialized = True
 
     def estimate_burned_area(
@@ -86,8 +90,12 @@ class GeeCarbonEstimationService(CarbonEstimationSourceInterface):
         period_start: date,
         period_end: date,
     ) -> RawBurnedAreaEstimate:
-        if not self.service_account_json:
-            raise CarbonEstimationError("Clé de service GEE manquante (GEE_SERVICE_ACCOUNT_JSON).")
+        if not self.service_account_json and not self.project_id:
+            raise CarbonEstimationError(
+                "Aucune configuration GEE trouvée : renseigne soit "
+                "GEE_SERVICE_ACCOUNT_JSON (compte de service), soit "
+                "GEE_PROJECT_ID (authentification personnelle) dans .env."
+            )
 
         try:
             self._ensure_initialized()
@@ -122,6 +130,14 @@ class GeeCarbonEstimationService(CarbonEstimationSourceInterface):
             .filterBounds(geometry)
         )
 
+        # MCD64A1 est un produit MENSUEL, publié avec plusieurs semaines de
+        # délai. Une période récente peut ne contenir AUCUNE image (pas
+        # encore publiée) -> cas normal, pas une erreur. Sans cette
+        # vérification, .max() sur une collection vide renvoie une image à
+        # 0 bande, et .gt() plante juste après.
+        if collection.size().getInfo() == 0:
+            return 0.0
+
         burned_mask = collection.select("BurnDate").max().gt(0)
         area_image = burned_mask.multiply(ee.Image.pixelArea())
 
@@ -137,7 +153,10 @@ class GeeCarbonEstimationService(CarbonEstimationSourceInterface):
 
 
 def get_gee_carbon_estimation_service() -> CarbonEstimationSourceInterface:
-    """Factory utilisée par le futur job d'estimation et les futures routes."""
+    """Factory utilisée par le job d'estimation et les futures routes."""
     from app.core.config import settings
 
-    return GeeCarbonEstimationService(service_account_json=settings.GEE_SERVICE_ACCOUNT_JSON)
+    return GeeCarbonEstimationService(
+        service_account_json=settings.GEE_SERVICE_ACCOUNT_JSON,
+        project_id=settings.GEE_PROJECT_ID,
+    )

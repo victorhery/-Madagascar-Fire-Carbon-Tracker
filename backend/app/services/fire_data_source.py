@@ -11,23 +11,11 @@ FIRMS_AREA_URL = "https://firms.modaps.eosdis.nasa.gov/api/area/csv"
 
 
 class FireDataSourceError(Exception):
-    """
-    Erreur levée quand la source de données de feux (FIRMS aujourd'hui,
-    potentiellement une autre source demain) est indisponible ou renvoie
-    une réponse invalide. Volontairement indépendante de FastAPI/HTTPException
-    (principe S : ce module ne connaît que la donnée, pas le web) — c'est
-    à l'appelant (route, job) de la traduire en réponse HTTP si besoin.
-    """
+    pass
 
 
 @dataclass
 class RawFireDetection:
-    """
-    Détection de feu telle que reçue de la source externe, AVANT tout
-    passage en base. Volontairement distincte du modèle SQLAlchemy
-    FireDetection (principe S : ce module ne connaît rien de PostgreSQL).
-    """
-
     latitude: float
     longitude: float
     acq_date: date
@@ -39,70 +27,81 @@ class RawFireDetection:
 
 
 class FireDataSourceInterface(ABC):
-    """Interface : n'importe quelle source de détections de feux futures
-    (autre satellite, autre fournisseur) pourra l'implémenter sans that
-    le code appelant (job, tests) n'ait à changer (principe O)."""
-
     @abstractmethod
-    async def fetch_recent(self, day_range: int = 1) -> List[RawFireDetection]:
-        ...
+    async def fetch_recent(self, day_range: int = 1) -> List[RawFireDetection]: ...
 
 
 class FirmsFetcherService(FireDataSourceInterface):
-    """Implémentation concrète pour NASA FIRMS (VIIRS_SNPP_NRT)."""
+    """
+    Interroge FIRMS sur un ou plusieurs satellites, et fusionne les résultats.
+    Combiner plusieurs satellites (ex: VIIRS + MODIS) réduit les détections
+    manquées : un satellite peut voir un feu que l'autre a raté (nuages,
+    heure de passage différente).
 
-    def __init__(self, api_key: str, bbox: str, satellite: str = "VIIRS_SNPP_NRT"):
+    Chaque détection reste identifiée par SON satellite d'origine (le champ
+    `satellite` de RawFireDetection) -> deux satellites qui voient le même
+    feu réel produisent 2 lignes distinctes en base, pas un doublon
+    (cohérent avec la UniqueConstraint du modèle, qui inclut le satellite).
+    """
+
+    DEFAULT_SATELLITES = ["VIIRS_SNPP_NRT", "MODIS_NRT"]
+
+    def __init__(self, api_key: str, bbox: str, satellites: Optional[List[str]] = None):
         self.api_key = api_key
         self.bbox = bbox
-        self.satellite = satellite
+        self.satellites = satellites or list(self.DEFAULT_SATELLITES)
 
     async def fetch_recent(self, day_range: int = 1) -> List[RawFireDetection]:
         if not self.api_key:
             raise FireDataSourceError("Clé API FIRMS manquante.")
 
-        url = f"{FIRMS_AREA_URL}/{self.api_key}/{self.satellite}/{self.bbox}/{day_range}"
+        all_detections: List[RawFireDetection] = []
+        errors: List[str] = []
 
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url, timeout=10.0)
-                response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise FireDataSourceError(f"Erreur réseau FIRMS : {exc}") from exc
+        async with httpx.AsyncClient() as client:
+            for satellite in self.satellites:
+                url = f"{FIRMS_AREA_URL}/{self.api_key}/{satellite}/{self.bbox}/{day_range}"
+                try:
+                    response = await client.get(url, timeout=10.0)
+                    response.raise_for_status()
+                    all_detections.extend(self._parse_csv(response.text, satellite))
+                except httpx.HTTPError as exc:
+                    # Un satellite en panne ne doit pas faire perdre les
+                    # données des autres -> on continue, on trace l'erreur.
+                    errors.append(f"{satellite}: {exc}")
 
-        return self._parse_csv(response.text)
+        if errors and len(errors) == len(self.satellites):
+            raise FireDataSourceError(
+                f"Tous les satellites FIRMS ont échoué : {'; '.join(errors)}"
+            )
 
-    def _parse_csv(self, csv_text: str) -> List[RawFireDetection]:
+        return all_detections
+
+    def _parse_csv(self, csv_text: str, satellite: str) -> List[RawFireDetection]:
         reader = csv.DictReader(io.StringIO(csv_text))
         detections: List[RawFireDetection] = []
-
         for row in reader:
             try:
-                detections.append(
-                    RawFireDetection(
-                        latitude=float(row["latitude"]),
-                        longitude=float(row["longitude"]),
-                        acq_date=datetime.strptime(row["acq_date"], "%Y-%m-%d").date(),
-                        acq_time=row.get("acq_time", ""),
-                        satellite=self.satellite,
-                        brightness=float(row["bright_ti4"]) if row.get("bright_ti4") else None,
-                        confidence=row.get("confidence"),
-                        frp=float(row["frp"]) if row.get("frp") else None,
-                    )
-                )
-            except (ValueError, KeyError):
-                # Ligne malformée renvoyée par FIRMS -> ignorée, comme dans
-                # l'implémentation d'origine dans main.py.
-                continue
+                # VIIRS utilise "bright_ti4", MODIS utilise "brightness" ->
+                # sans ce repli, la luminosité des lignes MODIS serait
+                # silencieusement vide.
+                brightness_raw = row.get("bright_ti4") or row.get("brightness")
 
+                detections.append(RawFireDetection(
+                    latitude=float(row["latitude"]),
+                    longitude=float(row["longitude"]),
+                    acq_date=datetime.strptime(row["acq_date"], "%Y-%m-%d").date(),
+                    acq_time=row.get("acq_time", ""),
+                    satellite=satellite,
+                    brightness=float(brightness_raw) if brightness_raw else None,
+                    confidence=row.get("confidence"),
+                    frp=float(row["frp"]) if row.get("frp") else None,
+                ))
+            except (ValueError, KeyError):
+                continue
         return detections
 
 
 def get_firms_fetcher_service() -> FireDataSourceInterface:
-    """
-    Factory utilisée par le job de polling (Phase 4) et les futures routes.
-    Importé ici plutôt qu'en haut du fichier pour éviter tout couplage
-    circulaire entre app.core.config et app.services.
-    """
     from app.core.config import settings
-
     return FirmsFetcherService(api_key=settings.NASA_MAP_KEY, bbox=settings.COFAV_BBOX)

@@ -17,15 +17,19 @@ class Settings:
     COFAV_BBOX: str = "46.5,-22.5,47.8,-20.5"
 
     # --- Base de données PostgreSQL (Phase 0) ---
-    # En dev/local : postgresql://user:password@localhost:5432/firecarbon
-    # En test : surchargé par une DB SQLite en mémoire (voir tests/conftest.py)
     DATABASE_URL: str = os.getenv(
         "DATABASE_URL",
         "postgresql+psycopg2://postgres:postgres@localhost:5432/firecarbon",
     )
 
-    # --- Google Earth Engine (préparé pour Phase 6, pas encore utilisé) ---
+    # --- Google Earth Engine ---
+    # Mode "compte de service" (Phase 6, prévu pour la production/ONG) :
+    # GEE_SERVICE_ACCOUNT_JSON doit être renseigné.
+    # Mode "authentification personnelle" (dev local, sans clé JSON) :
+    # laisser GEE_SERVICE_ACCOUNT_JSON vide, renseigner seulement GEE_PROJECT_ID,
+    # et avoir lancé `earthengine authenticate` une fois dans ce venv.
     GEE_SERVICE_ACCOUNT_JSON: str = os.getenv("GEE_SERVICE_ACCOUNT_JSON", "")
+    GEE_PROJECT_ID: str = os.getenv("GEE_PROJECT_ID", "")
 
 
 settings = Settings()
