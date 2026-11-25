@@ -2,7 +2,7 @@
   <header class="h-20 bg-white border-b border-slate-100 px-8 flex items-center justify-between shrink-0">
     <!-- Titre principal -->
     <h2 class="text-lg font-bold text-slate-800 tracking-wide uppercase">
-      Dashboard Madagascar : Suivi des feux et émissions carbone
+      Dashboard Madagascar : Suivi des feux et du carbone affecté
     </h2>
 
     <!-- Actions & Profil -->

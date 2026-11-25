@@ -13,3 +13,4 @@ class BurnedAreaOut(BaseModel):
     period_start: datetime.date
     period_end: datetime.date
     computed_at: datetime.datetime
+    source: str

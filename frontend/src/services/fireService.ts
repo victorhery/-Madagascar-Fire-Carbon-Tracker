@@ -16,14 +16,21 @@ export interface FireFeatureCollection {
       acq_date?: string
       acq_time?: string
       frp?: number
+      satellite?: string
       [key: string]: unknown
     }
   }>
 }
 
-export async function fetchRecentFires(dayRange: number = 7): Promise<FireFeatureCollection> {
-  const response = await axios.get<FireFeatureCollection>(`${API_BASE_URL}/fires/recent`, {
-    params: { day_range: dayRange }
-  })
+export async function fetchRecentFires(
+  dayRange: number = 7
+): Promise<FireFeatureCollection> {
+  const response = await axios.get<FireFeatureCollection>(
+    `${API_BASE_URL}/fires/recent`,
+    {
+      params: { day_range: dayRange },
+    }
+  )
+
   return response.data
 }

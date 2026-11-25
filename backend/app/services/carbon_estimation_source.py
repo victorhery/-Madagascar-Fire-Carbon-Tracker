@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import date
-from typing import Tuple
+from datetime import date, timedelta
+from typing import Dict, List, Tuple
 
 import ee
 
@@ -32,6 +32,24 @@ class CarbonEstimationSourceInterface(ABC):
         period_start: date,
         period_end: date,
     ) -> RawBurnedAreaEstimate:
+        """Un seul résultat agrégé pour toute la fenêtre -> utile pour un
+        test manuel rapide, mais masque QUAND dans la fenêtre le feu a eu
+        lieu. Voir estimate_burned_area_daily pour la version exploitée
+        automatiquement par le scheduler."""
+        ...
+
+    @abstractmethod
+    def estimate_burned_area_daily(
+        self,
+        region: str,
+        bbox: Tuple[float, float, float, float],
+        period_start: date,
+        period_end: date,
+    ) -> List[RawBurnedAreaEstimate]:
+        """Une estimation PAR JOUR où une combustion a été détectée dans la
+        fenêtre (period_start == period_end sur chaque résultat), au lieu
+        d'un seul blob agrégé -> permet de garder un historique jour par
+        jour, sans jamais écraser un jour déjà connu."""
         ...
 
 
@@ -76,12 +94,17 @@ class GeeCarbonEstimationService(CarbonEstimationSourceInterface):
             )
             ee.Initialize(credentials, project=self.project_id or None)
         else:
-            # Authentification personnelle : les credentials mis en cache
-            # localement par `earthengine authenticate` sont utilisés
-            # automatiquement, sans navigateur ni prompt supplémentaire.
             ee.Initialize(project=self.project_id)
 
         self._initialized = True
+
+    def _check_credentials(self) -> None:
+        if not self.service_account_json and not self.project_id:
+            raise CarbonEstimationError(
+                "Aucune configuration GEE trouvée : renseigne soit "
+                "GEE_SERVICE_ACCOUNT_JSON (compte de service), soit "
+                "GEE_PROJECT_ID (authentification personnelle) dans .env."
+            )
 
     def estimate_burned_area(
         self,
@@ -90,12 +113,7 @@ class GeeCarbonEstimationService(CarbonEstimationSourceInterface):
         period_start: date,
         period_end: date,
     ) -> RawBurnedAreaEstimate:
-        if not self.service_account_json and not self.project_id:
-            raise CarbonEstimationError(
-                "Aucune configuration GEE trouvée : renseigne soit "
-                "GEE_SERVICE_ACCOUNT_JSON (compte de service), soit "
-                "GEE_PROJECT_ID (authentification personnelle) dans .env."
-            )
+        self._check_credentials()
 
         try:
             self._ensure_initialized()
@@ -115,6 +133,36 @@ class GeeCarbonEstimationService(CarbonEstimationSourceInterface):
             period_end=period_end,
         )
 
+    def estimate_burned_area_daily(
+        self,
+        region: str,
+        bbox: Tuple[float, float, float, float],
+        period_start: date,
+        period_end: date,
+    ) -> List[RawBurnedAreaEstimate]:
+        self._check_credentials()
+
+        try:
+            self._ensure_initialized()
+            daily_areas = self._compute_daily_burned_area_hectares(bbox, period_start, period_end)
+        except CarbonEstimationError:
+            raise
+        except Exception as exc:
+            raise CarbonEstimationError(
+                f"Erreur Google Earth Engine (extraction quotidienne) : {exc}"
+            ) from exc
+
+        return [
+            RawBurnedAreaEstimate(
+                region=region,
+                area_hectares=area_ha,
+                carbon_tons_estimate=area_ha * self.carbon_factor_tons_per_hectare,
+                period_start=day,
+                period_end=day,
+            )
+            for day, area_ha in daily_areas
+        ]
+
     def _compute_burned_area_hectares(
         self,
         bbox: Tuple[float, float, float, float],
@@ -130,11 +178,6 @@ class GeeCarbonEstimationService(CarbonEstimationSourceInterface):
             .filterBounds(geometry)
         )
 
-        # MCD64A1 est un produit MENSUEL, publié avec plusieurs semaines de
-        # délai. Une période récente peut ne contenir AUCUNE image (pas
-        # encore publiée) -> cas normal, pas une erreur. Sans cette
-        # vérification, .max() sur une collection vide renvoie une image à
-        # 0 bande, et .gt() plante juste après.
         if collection.size().getInfo() == 0:
             return 0.0
 
@@ -149,7 +192,68 @@ class GeeCarbonEstimationService(CarbonEstimationSourceInterface):
         )
 
         area_m2 = stats.get("BurnDate").getInfo() or 0
-        return area_m2 / 10000  # m² -> hectares
+        return area_m2 / 10000
+
+    def _compute_daily_burned_area_hectares(
+        self,
+        bbox: Tuple[float, float, float, float],
+        period_start: date,
+        period_end: date,
+    ) -> List[Tuple[date, float]]:
+        """
+        MCD64A1 encode, PAR PIXEL, le jour-de-l'année (1-366) où ce pixel a
+        brûlé (bande "BurnDate", 0 = non brûlé). Contrairement à
+        _compute_burned_area_hectares (qui fait juste BurnDate > 0 et jette
+        cette info), on regroupe ici les pixels par valeur de BurnDate pour
+        reconstruire une vraie surface brûlée PAR JOUR.
+
+        1 image MCD64A1 = 1 mois -> on combine l'année de chaque image
+        (system:time_start) avec le jour-de-l'année du pixel pour obtenir
+        une date calendaire absolue.
+        """
+        west, south, east, north = bbox
+        geometry = ee.Geometry.Rectangle([west, south, east, north])
+
+        collection = (
+            ee.ImageCollection(self.MODIS_BURNED_AREA_COLLECTION)
+            .filterDate(period_start.isoformat(), period_end.isoformat())
+            .filterBounds(geometry)
+        )
+
+        if collection.size().getInfo() == 0:
+            return []
+
+        image_list = collection.toList(collection.size())
+        count = image_list.size().getInfo()
+
+        daily_area_m2: Dict[date, float] = {}
+
+        for i in range(count):
+            image = ee.Image(image_list.get(i))
+            year = ee.Date(image.get("system:time_start")).get("year").getInfo()
+
+            burn_date_band = image.select("BurnDate")
+            combined = ee.Image.pixelArea().addBands(burn_date_band)
+
+            grouped = combined.reduceRegion(
+                reducer=ee.Reducer.sum().group(groupField=1, groupName="burn_doy"),
+                geometry=geometry,
+                scale=500,
+                maxPixels=1e9,
+            )
+            groups = grouped.get("groups").getInfo() or []
+
+            for group in groups:
+                doy = int(group.get("burn_doy", 0))
+                if doy <= 0:
+                    continue  # 0 = pixel non brûlé, exclu du regroupement
+                area_m2 = group.get("sum", 0) or 0
+                if area_m2 <= 0:
+                    continue
+                burn_date = date(int(year), 1, 1) + timedelta(days=doy - 1)
+                daily_area_m2[burn_date] = daily_area_m2.get(burn_date, 0.0) + area_m2
+
+        return sorted((day, area_m2 / 10000) for day, area_m2 in daily_area_m2.items())
 
 
 def get_gee_carbon_estimation_service() -> CarbonEstimationSourceInterface:

@@ -3,7 +3,12 @@ import datetime
 from fastapi import APIRouter, Depends
 
 from app.repositories import FireRepositoryInterface, get_fire_repository
-from app.schemas.fire import FireFeature, FireFeatureCollection, FireFeatureProperties, FireGeometry
+from app.schemas.fire import (
+    FireFeature,
+    FireFeatureCollection,
+    FireFeatureProperties,
+    FireGeometry,
+)
 
 router = APIRouter(prefix="/api/v1/fires", tags=["fires"])
 
@@ -14,23 +19,24 @@ def get_recent_fires(
     repo: FireRepositoryInterface = Depends(get_fire_repository),
 ) -> FireFeatureCollection:
     """
-    Lit les détections stockées en base (peuplée par le job de polling,
-    Phase 4) -> le frontend ne provoque plus jamais d'appel direct à FIRMS.
-    Si la base est vide (job pas encore lancé), renvoie une collection vide,
-    ce qui est un comportement normal, pas une erreur.
+    Lit les détections stockées en base, alimentée automatiquement par
+    le polling NASA FIRMS. Le frontend n'appelle jamais FIRMS directement.
     """
     since = datetime.date.today() - datetime.timedelta(days=day_range)
     detections = repo.list_recent(since=since)
 
     features = [
         FireFeature(
-            geometry=FireGeometry(coordinates=[detection.longitude, detection.latitude]),
+            geometry=FireGeometry(
+                coordinates=[detection.longitude, detection.latitude]
+            ),
             properties=FireFeatureProperties(
                 brightness=detection.brightness,
                 confidence=detection.confidence,
                 acq_date=detection.acq_date.isoformat(),
                 acq_time=detection.acq_time,
                 frp=detection.frp,
+                satellite=detection.satellite,
             ),
         )
         for detection in detections

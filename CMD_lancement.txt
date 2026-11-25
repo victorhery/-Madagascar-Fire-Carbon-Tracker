@@ -1,0 +1,6 @@
+cd .\backend\        
+venv\Scripts\activate
+.\start.bat
+cd .\frontend\
+npm run dev
+http://localhost:5173/

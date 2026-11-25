@@ -9,11 +9,12 @@ class FireFeatureProperties(BaseModel):
     acq_date: str
     acq_time: str
     frp: Optional[float] = None
+    satellite: str
 
 
 class FireGeometry(BaseModel):
     type: str = "Point"
-    coordinates: List[float]  # [longitude, latitude], convention GeoJSON
+    coordinates: List[float]
 
 
 class FireFeature(BaseModel):
@@ -23,11 +24,5 @@ class FireFeature(BaseModel):
 
 
 class FireFeatureCollection(BaseModel):
-    """
-    Reprend exactement la forme attendue par frontend/src/services/fireService.ts
-    (FireFeatureCollection) -> aucun changement necessaire côté frontend
-    quand on branchera cet endpoint en Phase 8.
-    """
-
     type: str = "FeatureCollection"
     features: List[FireFeature]

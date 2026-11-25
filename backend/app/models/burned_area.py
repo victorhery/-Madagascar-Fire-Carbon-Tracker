@@ -7,10 +7,13 @@ from app.core.database import Base
 class BurnedArea(Base):
     """
     Une ligne = un résultat d'estimation Google Earth Engine (surface brûlée
-    + carbone) pour une région et une période données.
+    + carbone) pour une région et une période données, produit par UNE
+    source précise (`source`: "modis" ou "sentinel2").
 
-    Calculé beaucoup moins souvent que les détections FIRMS (job quotidien
-    ou hebdomadaire, Phase 6), sur les zones où des feux ont été détectés.
+    MODIS et Sentinel-2 peuvent chacun produire une estimation pour la même
+    région/période -> `source` permet au dashboard de choisir quel résultat
+    afficher (voir BurnedAreaRepository.latest_by_region : Sentinel-2 est
+    préféré quand disponible, car plus frais).
     """
 
     __tablename__ = "burned_areas"
@@ -24,6 +27,12 @@ class BurnedArea(Base):
     period_start = Column(Date, nullable=False)
     period_end = Column(Date, nullable=False)
 
+    # "modis" (MCD64A1, validé scientifiquement, ~2-3 mois de délai) ou
+    # "sentinel2" (dNBR maison, quelques jours de délai, indicatif).
+    # Default côté Python ET côté DB pour ne rien casser sur les lignes
+    # déjà en base avant cette colonne (voir note de migration).
+    source = Column(String, nullable=False, default="modis", server_default="modis")
+
     computed_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Lien optionnel vers la détection FIRMS à l'origine du calcul GEE.
@@ -33,4 +42,4 @@ class BurnedArea(Base):
     fire_detection = relationship("FireDetection")
 
     def __repr__(self) -> str:
-        return f"<BurnedArea id={self.id} region={self.region} ha={self.area_hectares}>"
+        return f"<BurnedArea id={self.id} region={self.region} ha={self.area_hectares} source={self.source}>"

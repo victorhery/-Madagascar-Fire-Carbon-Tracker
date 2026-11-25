@@ -1,7 +1,7 @@
 # Cache Python
 __pycache__/
 *.pyc
-
+*$py.class
 # Environnement virtuel Python
 backend/venv/
 venv/
@@ -14,3 +14,12 @@ backend/.env
 # Fichiers temporaires ou exports
 codebase_complet.txt
 *.log
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db

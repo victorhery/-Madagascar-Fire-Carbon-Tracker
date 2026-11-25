@@ -1,7 +1,28 @@
 <template>
   <div class="space-y-6">
-    <!-- Cartes de statistiques (Feux, Surface, CO2, Alertes) -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+    <!-- Cartes de statistiques -->
+    <div
+      v-if="statsError"
+      class="bg-red-50 border border-red-200 text-red-600 text-xs font-medium rounded-2xl p-4"
+    >
+      {{ statsError }}
+    </div>
+
+    <div
+      v-else-if="isStatsLoading"
+      class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6"
+    >
+      <div
+        v-for="n in 4"
+        :key="n"
+        class="bg-white rounded-2xl border border-slate-100 shadow-sm p-6 h-24 animate-pulse"
+      ></div>
+    </div>
+
+    <div
+      v-else
+      class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6"
+    >
       <StatCard
         v-for="stat in stats"
         :key="stat.id"
@@ -16,8 +37,10 @@
       />
     </div>
 
-    <!-- Zone Cartographique avec Animation d'Introduction -->
-    <div class="relative w-full rounded-2xl overflow-hidden shadow-sm border border-slate-100 bg-slate-900">
+    <!-- Carte avec animation d’introduction -->
+    <div
+      class="relative w-full rounded-2xl overflow-hidden shadow-sm border border-slate-100 bg-slate-900"
+    >
       <Transition
         mode="out-in"
         enter-active-class="transition-opacity duration-500 ease-out"
@@ -27,14 +50,12 @@
         leave-from-class="opacity-100"
         leave-to-class="opacity-0"
       >
-        <!-- Composant Globe 3D au démarrage -->
         <GlobeIntro
           v-if="showIntro"
           key="globe"
           @finish="handleIntroFinish"
         />
 
-        <!-- Carte Leaflet COFAV 2D après l'intro -->
         <FireLeafletMap
           v-else
           key="map"
@@ -42,15 +63,26 @@
       </Transition>
     </div>
 
-    <!-- Section Basse : Graphique (12 jours) & Tableau des événements -->
+    <!-- Graphique sur 7 jours et tableau des événements -->
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      <FiresTrendChart />
+      <FiresTrendChart
+        :trend="fireTrend"
+        :loading="isStatsLoading"
+        :error="statsError"
+      />
+
       <RecentEventsTable />
     </div>
 
-    <!-- Footer d'attribution des données -->
-    <footer class="pt-2 text-center text-xs text-slate-400 font-medium">
-      Source données: <span class="text-slate-600 font-semibold">NASA FIRMS API</span> | © 2026 ENV-WATCH Madagascar
+    <!-- Attribution des données -->
+    <footer
+      class="pt-2 text-center text-xs text-slate-400 font-medium"
+    >
+      Source données:
+      <span class="text-slate-600 font-semibold">
+        NASA FIRMS API
+      </span>
+      | © 2026 ENV-WATCH Madagascar
     </footer>
   </div>
 </template>
@@ -64,7 +96,13 @@ import FiresTrendChart from '@/components/charts/FiresTrendChart.vue'
 import RecentEventsTable from '@/components/dashboard/RecentEventsTable.vue'
 import { useDashboardStats } from '@/composables/useDashboardStats'
 
-const { stats } = useDashboardStats()
+const {
+  stats,
+  fireTrend,
+  isLoading: isStatsLoading,
+  error: statsError,
+} = useDashboardStats()
+
 const showIntro = ref(true)
 
 const handleIntroFinish = () => {

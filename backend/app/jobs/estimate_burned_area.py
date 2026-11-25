@@ -1,5 +1,5 @@
 from datetime import date
-from typing import Tuple
+from typing import List, Tuple
 
 from app.models import BurnedArea
 from app.repositories import BurnedAreaRepositoryInterface
@@ -13,19 +13,13 @@ def run_estimate_burned_area(
     bbox: Tuple[float, float, float, float],
     period_start: date,
     period_end: date,
+    source_name: str = "modis",
 ) -> BurnedArea:
     """
-    Demande une estimation à `source` (GEE), puis la sauvegarde via `repo`.
-    Dépend uniquement des deux interfaces (principe D) -> testable avec de
-    purs mocks, sans réseau ni base de données réelle, comme run_poll_firms.
-
-    NOTE : contrairement à run_poll_firms (qui balaie automatiquement toute
-    la zone COFAV), cette fonction traite UNE région/bbox à la fois, fournie
-    explicitement par l'appelant. La détection automatique de "quelles
-    régions ont eu des feux récemment" nécessiterait un rapprochement
-    coordonnées -> région qui n'existe pas encore côté backend (seul le
-    frontend connaît COFAV_CITIES/COFAV_POLYGON) -> à construire dans une
-    phase ultérieure si besoin.
+    Version AGRÉGÉE (un seul blob pour toute la fenêtre) -> conservée pour
+    les tests manuels ponctuels (run_estimate_burned_area_once.py sans
+    --daily). Le scheduler automatique utilise désormais
+    run_estimate_burned_area_daily ci-dessous.
     """
     estimate = source.estimate_burned_area(
         region=region, bbox=bbox, period_start=period_start, period_end=period_end
@@ -37,6 +31,50 @@ def run_estimate_burned_area(
         carbon_tons_estimate=estimate.carbon_tons_estimate,
         period_start=estimate.period_start,
         period_end=estimate.period_end,
+        source=source_name,
     )
 
     return repo.create(burned_area)
+
+
+def run_estimate_burned_area_daily(
+    source: CarbonEstimationSourceInterface,
+    repo: BurnedAreaRepositoryInterface,
+    region: str,
+    bbox: Tuple[float, float, float, float],
+    period_start: date,
+    period_end: date,
+    source_name: str,
+) -> List[BurnedArea]:
+    """
+    Version QUOTIDIENNE : persiste UNE ligne PAR JOUR détecté (period_start
+    == period_end sur chaque ligne), jamais un blob agrégé. Dédoublonnée
+    par (région, source, jour) -> rejouer une fenêtre qui chevauche des
+    jours déjà connus ne crée aucun doublon (même principe que
+    run_poll_firms pour les détections FIRMS). C'est cette fonction que le
+    scheduler automatique appelle (voir app/core/scheduling.py).
+    """
+    daily_estimates = source.estimate_burned_area_daily(
+        region=region, bbox=bbox, period_start=period_start, period_end=period_end
+    )
+
+    created: List[BurnedArea] = []
+    for estimate in daily_estimates:
+        existing = repo.get_by_natural_key(
+            region=estimate.region, source=source_name,
+            period_start=estimate.period_start, period_end=estimate.period_end,
+        )
+        if existing is not None:
+            continue
+
+        burned_area = BurnedArea(
+            region=estimate.region,
+            area_hectares=estimate.area_hectares,
+            carbon_tons_estimate=estimate.carbon_tons_estimate,
+            period_start=estimate.period_start,
+            period_end=estimate.period_end,
+            source=source_name,
+        )
+        created.append(repo.create(burned_area))
+
+    return created

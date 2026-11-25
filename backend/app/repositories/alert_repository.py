@@ -14,12 +14,20 @@ class AlertRepositoryInterface(ABC):
         ...
 
     @abstractmethod
+    def update(self, alert: Alert) -> Alert:
+        ...
+
+    @abstractmethod
     def get_by_id(self, alert_id: int) -> Optional[Alert]:
         ...
 
     @abstractmethod
+    def get_active_by_region(self, region: str) -> Optional[Alert]:
+        """Retourne l'alerte active la plus récente pour une région."""
+        ...
+
+    @abstractmethod
     def list_active(self) -> List[Alert]:
-        """Alertes non résolues (resolved=False) -> alimente le KPI "alertes du jour"."""
         ...
 
     @abstractmethod
@@ -41,14 +49,28 @@ class SQLAlchemyAlertRepository(AlertRepositoryInterface):
         self.db.refresh(alert)
         return alert
 
+    def update(self, alert: Alert) -> Alert:
+        self.db.add(alert)
+        self.db.commit()
+        self.db.refresh(alert)
+        return alert
+
     def get_by_id(self, alert_id: int) -> Optional[Alert]:
         return self.db.get(Alert, alert_id)
+
+    def get_active_by_region(self, region: str) -> Optional[Alert]:
+        return (
+            self.db.query(Alert)
+            .filter_by(region=region, resolved=False)
+            .order_by(Alert.triggered_at.desc(), Alert.id.desc())
+            .first()
+        )
 
     def list_active(self) -> List[Alert]:
         return (
             self.db.query(Alert)
             .filter_by(resolved=False)
-            .order_by(Alert.triggered_at.desc())
+            .order_by(Alert.triggered_at.desc(), Alert.id.desc())
             .all()
         )
 
@@ -56,7 +78,7 @@ class SQLAlchemyAlertRepository(AlertRepositoryInterface):
         return (
             self.db.query(Alert)
             .filter_by(region=region)
-            .order_by(Alert.triggered_at.desc())
+            .order_by(Alert.triggered_at.desc(), Alert.id.desc())
             .all()
         )
 
